@@ -10,11 +10,17 @@ import java.text.ParseException;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.mapreduce.lib.output.NullOutputFormat;
-import Sentence.SentenceInputFormat;
-import Sentence.SentenceWritable;
+import sentence.SentenceInputFormat;
+import sentence.SentenceWritable;
 
 /**
  * Sort the collection of titles on Timestamp, for online processing.
+ * input: folder of SentenceFile, unsorted
+ * output: folder of SentenceFile, grouped in a YYYY-MM-DD file and within each file on creationtime.
+ * startdate: YYYY-MM-DD, the first date in the corpus
+ * enddate: YYYY-MM-DD, the last date in the corpus
+ * remark: forgot to use the original sentenceID to keep titles with the same creationtime 
+ * in the original order, which means slight differences are to be expected in reproduced results.
  * @author jeroen
  */
 public class SortJob {
@@ -26,15 +32,18 @@ public class SortJob {
         conf.setReduceSpeculativeExecution(false);
 
         DayPartitioner.setTime(conf, conf.get("startdate"), conf.get("enddate"));
-        
-        String input = conf.get("input");        
-        Job job = new Job(conf, input, conf.get("output"), conf.get("startdate"), conf.get("enddate"));
-        
         int reducers = DayPartitioner.getNumberOfReducers(conf);
-        log.info("reducers %d", reducers);
+               
+        Job job = new Job(conf, 
+                conf.get("input"), 
+                conf.get("output"), 
+                conf.get("startdate"), 
+                conf.get("enddate"), 
+                reducers);
+        
         job.setNumReduceTasks(reducers);
         job.setInputFormatClass(SentenceInputFormat.class);
-        SentenceInputFormat.addDirs(job, input);
+        SentenceInputFormat.addDirs(job, conf.get("input"));
         
         job.setMapperClass(SortMap.class);
         job.setMapOutputKeyClass(LongWritable.class);
@@ -44,9 +53,8 @@ public class SortJob {
         job.setPartitionerClass(DayPartitioner.class);
         job.setReducerClass(SortReducer.class);
         
-        Path out = new Path(conf.get("output"));
         job.setOutputFormatClass(NullOutputFormat.class);
-        new HDFSPath(conf, out).trash();
+        conf.getHDFSPath("output").trash();
         
         job.waitForCompletion(true);
     }

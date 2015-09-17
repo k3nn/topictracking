@@ -1,8 +1,8 @@
 package stream5Retrieve;
 
-import MatchingClusterNode.MatchingClusterNodeWritable;
-import Cluster.ClusterFile;
-import Cluster.ClusterWritable;
+import matchingClusterNode.MatchingClusterNodeWritable;
+import cluster.ClusterFile;
+import cluster.ClusterWritable;
 import io.github.htools.io.Datafile;
 import io.github.htools.lib.Log;
 import io.github.htools.hadoop.Conf;
@@ -16,13 +16,14 @@ import io.github.htools.io.buffer.BufferSerializable;
 import io.github.htools.io.struct.StructureReader;
 import io.github.htools.io.struct.StructureWriter;
 import io.github.htools.lib.MathTools;
+import io.github.htools.lib.StrTools;
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
-import static stream5Retrieve.RetrieveTop3.getTopics;
+import static kbaeval.TopicFile.getTopics;
 import kbaeval.TopicWritable;
 import kbaeval.TrecWritable;
 import org.apache.hadoop.fs.Path;
@@ -30,32 +31,39 @@ import org.apache.hadoop.io.WritableComparable;
 import org.apache.hadoop.mapreduce.Partitioner;
 import org.apache.hadoop.mapreduce.lib.output.NullOutputFormat;
 
+/**
+ * Constructs a summary based on the per topic sentence clustering (stream4) by
+ * qualifying sentences against a relevance model of the last h hours, using
+ * only sentences of at most l non stop words, that have at least a gain of g%
+ * novel information (measured either by unigrams or 2-word combinations) and
+ * rank in the top-r compared to previously selected sentences.
+ * <p/>
+ * This retriever performs a sweep over a range of parameter settings for h, l,
+ * g, and r and stores every result in a different file.
+ *
+ * @author Jeroen
+ */
 public class RetrieveJob {
 
     private static final Log log = new Log(RetrieveJob.class);
-    static Conf conf; 
+    static Conf conf;
 
     public static Job setup(String args[]) throws IOException {
         conf = new Conf(args, "-i input -o output -t topicfile");
+        conf.setReduceStart(0.5);
         conf.setReduceSpeculativeExecution(false);
         conf.setMapSpeculativeExecution(false);
         conf.setMapMemoryMB(8192);
         conf.setReduceMemoryMB(4096);
         conf.setTaskTimeout(3600000);
 
-        String input = conf.get("input");
-        Path out = new Path(conf.get("output"));
-
-        log.info("Tool name: %s", log.getLoggedClass().getName());
-        log.info(" - input: %s", input);
-        log.info(" - output: %s", out);
-        log.info(" - topicfile: %s", conf.get("topicfile"));
-
-        Job job = new Job(conf, input, out, conf.get("topicfile"));
-        //job.getConfiguration().setInt("mapreduce.task.timeout", 1800000);
+        Job job = new Job(conf,
+                conf.get("input"),
+                conf.get("output"),
+                conf.get("topicfile"));
 
         job.setInputFormatClass(InputFormat.class);
-        addInput(job, new HDFSPath(conf, conf.get("input")), conf.get("topicfile"));
+        addInput(job, conf.getHDFSPath("input"), conf.get("topicfile"));
 
         job.setNumReduceTasks(getParams().size());
         job.setMapperClass(RetrieveMap.class);
@@ -68,23 +76,21 @@ public class RetrieveJob {
         return job;
     }
 
-    public static void addInput(Job job, HDFSPath input, String topicfile) throws IOException {
+    public static void addInput(Job job, HDFSPath sentenceClustersPerTopicPath, String topicfile) throws IOException {
         HashMap<Integer, TopicWritable> topics = getTopics(topicfile);
-        for (Datafile df : input.getFiles()) {
-            String digit = df.getName().substring(df.getName().lastIndexOf(".") + 1);
-            if (digit.length() > 0) {
-                int topicid = Integer.parseInt(digit);
-                //if (topicid != 23) {
-                    TopicWritable t = topics.get(topicid);
-                    Collection<Setting> params = getParams();
-                    for (Setting s : params) {
-                        s.topicid = t.id;
-                        s.topicstart = t.start;
-                        s.topicend = t.end;
-                        s.query = t.query;
-                        InputFormat.add(job, s, new Path(df.getCanonicalPath()));
-                    }
-                //}
+        for (Datafile datafile : sentenceClustersPerTopicPath.getFiles()) {
+            String topicext = StrTools.getAfterLastString(datafile.getName(), ".");
+            if (topicext.length() > 0) {
+                int topicid = Integer.parseInt(topicext);
+                TopicWritable topic = topics.get(topicid);
+                Collection<Setting> params = getParams();
+                for (Setting setting : params) {
+                    setting.topicid = topic.id;
+                    setting.topicstart = topic.start;
+                    setting.topicend = topic.end;
+                    setting.query = topic.query;
+                    InputFormat.add(job, setting, new Path(datafile.getCanonicalPath()));
+                }
             }
         }
     }
@@ -103,7 +109,7 @@ public class RetrieveJob {
     }
 
     public static class Setting implements WritableComparable<Setting>, BufferSerializable {
-
+        // default settings
         public double gainratio = 0.3;
         public double hours = 1.0;
         public int length = 20;
@@ -152,22 +158,21 @@ public class RetrieveJob {
         }
 
         @Override
-        public void write(DataOutput d) throws IOException {
+        public void write(DataOutput dataOutput) throws IOException {
             BufferDelayedWriter writer = new BufferDelayedWriter();
             write(writer);
-            writer.writeBuffer(d);
+            writer.writeBuffer(dataOutput);
         }
 
         @Override
-        public void readFields(DataInput di) throws IOException {
-            BufferReaderWriter reader = new BufferReaderWriter(di);
+        public void readFields(DataInput dataInput) throws IOException {
+            BufferReaderWriter reader = new BufferReaderWriter(dataInput);
             this.read(reader);
         }
 
         @Override
-        public int compareTo(Setting o) {
-            int comp = topicid - o.topicid;
-            return comp;
+        public int compareTo(Setting otherSetting) {
+            return topicid - otherSetting.topicid;
         }
     }
 
@@ -176,44 +181,46 @@ public class RetrieveJob {
         HashMap<Setting, Integer> params = new HashMap();
 
         public SettingPartitioner() {
-            for (Setting s : getParams()) {
-                params.put(s, params.size());
+            for (Setting setting : getParams()) {
+                params.put(setting, params.size());
             }
         }
 
         @Override
-        public int getPartition(Setting key, Object value, int i) {
-            return params.get(key);
+        public int getPartition(Setting setting, Object value, int i) {
+            return params.get(setting);
         }
     }
 
+    /**
+     * @return a list that contains a sweep of parameter settings 
+     */
     public static ArrayList<Setting> getParams() {
-        ArrayList<Setting> settings = new ArrayList();
-        settings.add(new Setting());
-        for (double gainratio : new double[]{0.1, 0.15, 0.2, 0.25, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7}) {
-            Setting s = new Setting();
-            s.gainratio = gainratio;
-            settings.add(s);
+        ArrayList<Setting> settings = getParamsS();
+        for (double gainratio : new double[]{0.1, 0.15, 0.2, 0.25, 0.35, 0.4, 0.45, 0.50, 0.55, 0.6, 0.65, 0.7}) {
+            Setting setting = new Setting();
+            setting.gainratio = gainratio;
+            settings.add(setting);
         }
         for (double hours : new double[]{0.5, 2, 3}) {
-            Setting s = new Setting();
-            s.hours = hours;
-            settings.add(s);
+            Setting setting = new Setting();
+            setting.hours = hours;
+            settings.add(setting);
         }
         for (int length : new int[]{11, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 23, 24, 25, 26, 27, 28, 29}) {
-            Setting s = new Setting();
-            s.length = length;
-            settings.add(s);
+            Setting setting = new Setting();
+            setting.length = length;
+            settings.add(setting);
         }
         for (int topk : new int[]{1, 2, 3, 4, 6, 7, 8, 9, 10}) {
-            Setting s = new Setting();
-            s.topk = topk;
-            settings.add(s);
+            Setting setting = new Setting();
+            setting.topk = topk;
+            settings.add(setting);
         }
         return settings;
     }
 
-    public static ArrayList<Setting> getParams1() {
+    public static ArrayList<Setting> getParamsS() {
         ArrayList<Setting> settings = new ArrayList();
         settings.add(new Setting());
         return settings;

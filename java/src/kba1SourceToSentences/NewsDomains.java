@@ -13,16 +13,17 @@ import io.github.htools.lib.Log;
 public class NewsDomains {
 
     public static final Log log = new Log(NewsDomains.class);
-    private static final String defaultResourceFile = "newssites_kba.txt";
-    public static final NewsDomains instance = new NewsDomains();
     // resource file that contains a list of domains used, with a pseudo regex
     // that is used to determine if a page within a domain is indeed a 
     // news article
+    private static final String defaultResourceFile = "newssites_kba.txt";
+    
+    private static NewsDomains instance;
     // list of hosts for domainID 
     private String[] host;
     // all regex for the domains combined into one expression, that returns a 
     // pattern number to indicate which domain matched, used as internal domain ID
-    ByteRegex domainPattern;
+    private ByteRegex domainPattern;
 
     public NewsDomains(String resourcefile) {
         domainPattern = createDomainPattern(resourcefile);
@@ -32,27 +33,39 @@ public class NewsDomains {
         this(defaultResourceFile);
     }
 
+    public static NewsDomains getInstance() {
+        if (instance == null) {
+            instance = new NewsDomains();
+        }
+        return instance;
+    }
+    
     private ByteRegex createDomainPattern(String resourcefilename) {
-        String c = getDatafile(resourcefilename).readAsString();
-        String[] inputlines = c.split("\n");
-        host = new String[inputlines.length];
+        // read entire files of domainrules
+        String domainRules = getDatafile(resourcefilename).readAsString();
+        // split in separate domainrules, every line one rule
+        String[] domainRule = domainRules.split("\n");
+        // setup host array
+        host = new String[domainRule.length];
 
         // construct a regex that identifies if a page within a domain is a
         // news article. In tje resource file, %W, %A, %N, %Y are used to
         // express different wildcard matches, see below. In the resource
         // file, a . is a literal period and a dash a literal dash.
-        ByteRegex[] regex = new ByteRegex[inputlines.length];
-        for (int i = 0; i < inputlines.length; i++) {
-            String p = inputlines[i];
-            host[i] = p.substring(0, p.indexOf('/'));
-            p = p.replace("-", "\\-"); // convert dash to literal dash
-            p = p.replace(".", "\\."); // convert . to a literal .
-            p = p.replace("%W", "[^\\?]*?"); // any character except a ?
-            p = p.replace("%A", ".*?"); // any character
-            p = p.replace("%N", "[^/\\?]*"); // any text except a / or a ?
-            p = p.replace("%Y", "201\\d"); // hack yo detect a year, only works for years 201x
-            if (p.length() > 0) {
-                regex[i] = new ByteRegex(p);
+        ByteRegex[] regex = new ByteRegex[domainRule.length];
+        for (int i = 0; i < domainRule.length; i++) {
+            String rule = domainRule[i];
+            // host is the host section of the domain rule
+            host[i] = rule.substring(0, rule.indexOf('/'));
+            rule = rule.replace("-", "\\-"); // convert dash to literal dash
+            rule = rule.replace(".", "\\."); // convert . to a literal .
+            rule = rule.replace("%W", "[^\\?]*?"); // any character except a ?
+            rule = rule.replace("%A", ".*?"); // any character
+            rule = rule.replace("%N", "[^/\\?]*"); // any text except a / or a ?
+            rule = rule.replace("%Y", "201\\d"); // hack yo detect a year, only works for years 201x
+            if (rule.length() > 0) {
+                // create regex of the rule
+                regex[i] = new ByteRegex(rule);
             }
         }
         return ByteRegex.combine(regex);
@@ -70,7 +83,7 @@ public class NewsDomains {
      * @param domainID
      * @return host String for given internal domain ID
      */
-    public String getHost(int domainID) {
+    public String getHostPart(int domainID) {
         return host[domainID];
     }
 
@@ -79,8 +92,8 @@ public class NewsDomains {
      * @return internal domain number for given URL, or -1 if domain is unknown
      */
     public int getDomainForUrl(String url) {
-        ByteSearchPosition findPos = domainPattern.findPos(url);
-        return findPos.found() ? findPos.pattern : -1;
+        ByteSearchPosition urlPosition = domainPattern.findPos(url);
+        return urlPosition.found() ? urlPosition.pattern : -1;
     }
     
     public static void main(String[] args) {

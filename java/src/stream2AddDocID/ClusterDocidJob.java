@@ -1,8 +1,8 @@
 package stream2AddDocID;
 
-import Cluster.ClusterFile;
-import Cluster.ClusterWritable;
-import Cluster.NodeWritable;
+import cluster.ClusterFile;
+import cluster.ClusterWritable;
+import cluster.NodeWritable;
 import io.github.htools.io.Datafile;
 import io.github.htools.io.HDFSPath;
 import io.github.htools.lib.Log;
@@ -11,17 +11,21 @@ import io.github.htools.hadoop.io.IntPartitioner;
 import io.github.htools.hadoop.Job;
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.HashSet;
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.mapreduce.lib.output.NullOutputFormat;
-import Sentence.SentenceInputFormat;
-import Sentence.SentenceWritable;
+import sentence.SentenceInputFormat;
+import sentence.SentenceWritable;
+import io.github.htools.collection.HashMapList;
 
 /**
- * Retrieves the docIDs for the query matching clusters
+ * Retrieves the docIDs and adds these to the query matching clusters.
+ * input: folder with YYYY-MM-DD SentenceFile with the titles for the entire corpus (kba5)
+ * querymatchingclusters: folder with ClusterFile per topic, that contains the query matching title
+ * clusters that were formed during clustering.
+ * topicfile: TREC .xml file that contains the topics, using TopicFile reader
+ * output: folder with ClusterFile per topic, to which the documentIDs were added
+ * 
  * @author jeroen
  */
 public class ClusterDocidJob {
@@ -29,27 +33,23 @@ public class ClusterDocidJob {
     private static final Log log = new Log(ClusterDocidJob.class);
 
     public static Job setup(String args[]) throws IOException {
-        Conf conf = new Conf(args, "-i input -o output -r result -t topicfile");
+        Conf conf = new Conf(args, "-i input -o output -r querymatchingclusters -t topicfile");
         conf.setReduceSpeculativeExecution(false);
         conf.setTaskTimeout(60000000);
         conf.setReduceMemoryMB(4096);
 
-        String input = conf.get("input");
-        Path out = new Path(conf.get("output"));
-        setArticles(conf);
+        setTargetedSentenceIds(conf);
 
-        log.info("Tool name: %s", log.getLoggedClass().getName());
-        log.info(" - input: %s", input);
-        log.info(" - output: %s", out);
-        log.info(" - result dir: %s", conf.get("result"));
-        log.info(" - topicfile: %s", conf.get("topicfile"));
-
-        Job job = new Job(conf, input, out);
+        Job job = new Job(conf, 
+                conf.get("input"), 
+                conf.get("output"), 
+                conf.get("querymatchingclusters"), 
+                conf.get("topicfile"));
 
         job.setInputFormatClass(SentenceInputFormat.class);
-        SentenceInputFormat.addDirs(job, input);
+        SentenceInputFormat.addDirs(job, conf.get("input"));
 
-        job.setNumReduceTasks(getResultFiles(conf).size());
+        job.setNumReduceTasks(getQueryMatchingClusterFiles(conf).size());
         job.setMapperClass(ClusterDocidMap.class);
         job.setReducerClass(ClusterDocidReducer.class);
         job.setOutputFormatClass(NullOutputFormat.class);
@@ -57,7 +57,7 @@ public class ClusterDocidJob {
         job.setMapOutputValueClass(SentenceWritable.class);
         job.setPartitionerClass(IntPartitioner.class);
 
-        FileSystem.get(conf).delete(out, true);
+        conf.getHDFSFile("output").trash();
         return job;
     }
 
@@ -66,50 +66,46 @@ public class ClusterDocidJob {
      * in the configuration
      * @param conf
      */
-    public static void setArticles(Conf conf) throws IOException {
-        ArrayList<Datafile> files = getResultFiles(conf);
-        for (int i = 0; i < files.size(); i++) {
-            files.get(i).setBufferSize(100000000);
-            ClusterFile cf = new ClusterFile(files.get(i));
-            HashSet<Long> list = new HashSet();
-            for (ClusterWritable cluster : cf) {
-                log.info("%d", cluster.clusterid);
+    public static void setTargetedSentenceIds(Conf conf) throws IOException {
+        ArrayList<Datafile> queryMatchingClusterFiles = getQueryMatchingClusterFiles(conf);
+        for (int topicIndex = 0; topicIndex < queryMatchingClusterFiles.size(); topicIndex++) {
+            Datafile queryMatchingClusterDatafile = queryMatchingClusterFiles.get(topicIndex);
+            queryMatchingClusterDatafile.setBufferSize(10000000);
+            ClusterFile clusterFile = new ClusterFile(queryMatchingClusterDatafile);
+            
+            HashSet<Long> sentenceIds = new HashSet();
+            for (ClusterWritable cluster : clusterFile) {
                 for (NodeWritable node : cluster.nodes)
-                   list.add(node.sentenceID);
+                   sentenceIds.add(node.sentenceID);
             }
-            conf.setLongList("resultids." + i, list);
+            conf.setLongList("resultids." + topicIndex, sentenceIds);
         }
-        conf.setInt("topics", files.size());
+        conf.setInt("topics", queryMatchingClusterFiles.size());
     }
     
     /**
      * @param conf
      * @return a map of reducer ID, list of nodeIDs for which docIDs are retrieved
      */
-    public static HashMap<Long, ArrayList<Integer>> getArticles(Conf conf) {
-        HashMap<Long, ArrayList<Integer>> map = new HashMap();
+    public static HashMapList<Long, Integer> getTargetedSentenceIds(Conf conf) {
+        HashMapList<Long, Integer> sentenceId2TopicReducer = new HashMapList();
         int topics = conf.getInt("topics", 0);
-        for (int i = 0; i < topics; i++) {
-            ArrayList<Long> longList = conf.getLongList("resultids." + i);
-            for (long j : longList) {
-                ArrayList<Integer> list = map.get(j);
-                if (list == null) {
-                    list = new ArrayList();
-                    map.put(j, list);
-                }
-                list.add(i);
+        for (int topicIndex = 0; topicIndex < topics; topicIndex++) {
+            ArrayList<Long> sentenceIds = conf.getLongList("resultids." + topicIndex);
+            for (long sentenceId : sentenceIds) {
+                sentenceId2TopicReducer.add(sentenceId, topicIndex);
             }
         }
-        return map;
+        return sentenceId2TopicReducer;
     }
     
     /**
      * @param conf
      * @return list of result files, for which docIDs must be retrieved
      */
-    public static ArrayList<Datafile> getResultFiles(Conf conf) throws IOException {
-        HDFSPath dir = new HDFSPath(conf, conf.get("result"));
-        return dir.getFiles();
+    public static ArrayList<Datafile> getQueryMatchingClusterFiles(Conf conf) throws IOException {
+        HDFSPath queryMatchingClusterPath = conf.getHDFSPath("querymatchingclusters");
+        return queryMatchingClusterPath.getFiles();
     }
 
     public static void main(String[] args) throws Exception {

@@ -1,7 +1,7 @@
 package kbaeval;
 
-import MatchingClusterNode.MatchingClusterNodeFile;
-import MatchingClusterNode.MatchingClusterNodeWritable;
+import matchingClusterNode.MatchingClusterNodeFile;
+import matchingClusterNode.MatchingClusterNodeWritable;
 import io.github.htools.collection.ArrayMap;
 import io.github.htools.io.Datafile;
 import io.github.htools.lib.ArgsParser;

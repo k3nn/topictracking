@@ -8,7 +8,9 @@ import java.util.HashMap;
 import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.mapreduce.Mapper;
-import Sentence.SentenceWritable;
+import sentence.SentenceWritable;
+import io.github.htools.collection.HashMapList;
+import io.github.htools.hadoop.ContextTools;
 
 /**
  * emit sentences that match a node in a query matching cluster, to the reducer of that topic
@@ -18,20 +20,22 @@ public class ClusterDocidMap extends Mapper<LongWritable, SentenceWritable, IntW
 
     public static final Log log = new Log(ClusterDocidMap.class);
     Conf conf;
-    HashMap<Long, ArrayList<Integer>> articles;
+    
+    // these are the targeted sentenceIds that appear in the queryMatchingClusters
+    HashMapList<Long, Integer> sentenceId2TopicReducer;
     IntWritable outkey = new IntWritable();
 
     @Override
     public void setup(Context context) throws IOException {
-        conf = Conf.convert(context.getConfiguration());
-        articles = ClusterDocidJob.getArticles(conf);
+        conf = ContextTools.getConfiguration(context);
+        sentenceId2TopicReducer = ClusterDocidJob.getTargetedSentenceIds(conf);
     }
 
     @Override
     public void map(LongWritable key, SentenceWritable value, Context context) throws IOException, InterruptedException {
-        ArrayList<Integer> list = articles.get(value.sentenceID);
-        if (list != null) {
-            for (int reducer : list) {
+        ArrayList<Integer> topicReducers = sentenceId2TopicReducer.get(value.sentenceID);
+        if (topicReducers != null) {
+            for (int reducer : topicReducers) {
                 outkey.set(reducer);
                 context.write(outkey, value);
             }

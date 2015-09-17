@@ -1,7 +1,7 @@
 package kbapool;
 
-import Sentence.SentenceInputFormat;
-import Sentence.SentenceWritable;
+import sentence.SentenceInputFormat;
+import sentence.SentenceWritable;
 import io.github.htools.collection.HashMap3;
 import io.github.htools.collection.HashMapSet;
 import io.github.htools.io.Datafile;
@@ -57,8 +57,8 @@ public class CreatePoolJob {
     public static void set(Conf conf) throws IOException {
         HashMap<String, Item> map = new HashMap();
         String paths[] = conf.getStrings("results");
-        for (String p : paths) {
-            HDFSPath path = new HDFSPath(conf, p);
+        for (String pathstring : paths) {
+            HDFSPath path = new HDFSPath(conf, pathstring);
             for (Datafile df : path.getFiles()) {
                 if (!df.getName().endsWith(".titles")) {
                     log.info("%s", df.getName());

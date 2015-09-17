@@ -1,26 +1,21 @@
 package stream4ClusterSentences;
 
-import ClusterNode.ClusterNodeWritable;
-import KNN.Cluster;
-import KNN.Stream;
-import KNN.Node;
-import KNN.NodeD;
-import Cluster.ClusterFile;
-import Cluster.ClusterWritable;
-import Cluster.NodeWritable;
+import io.github.k3nn.Cluster;
+import io.github.k3nn.ClusteringGraph;
+import io.github.k3nn.impl.NodeSentence;
+import cluster.ClusterFile;
+import cluster.ClusterWritable;
+import cluster.NodeWritable;
 import io.github.htools.extract.DefaultTokenizer;
 import io.github.htools.io.Datafile;
 import io.github.htools.lib.Log;
-import io.github.htools.hadoop.io.LongLongWritable;
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.HashSet;
-import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.io.NullWritable;
 import org.apache.hadoop.mapreduce.Reducer;
-import Sentence.SentenceWritable;
-import io.github.htools.hadoop.io.IntBoolWritable;
+import sentence.SentenceWritable;
+import io.github.htools.hadoop.Conf;
+import io.github.htools.hadoop.ContextTools;
 import io.github.htools.hadoop.io.LongBoolWritable;
 
 /**
@@ -30,11 +25,9 @@ import io.github.htools.hadoop.io.LongBoolWritable;
 public class ClusterSentencesReducer extends Reducer<LongBoolWritable, SentenceWritable, NullWritable, NullWritable> {
 
     public static final Log log = new Log(ClusterSentencesReducer.class);
-    Configuration conf;
-    DefaultTokenizer tokenizer = Stream.getUnstemmedTokenizer();
-    HashMap<Integer, ArrayList<ClusterNodeWritable>> map = new HashMap();
-    ClusterFile cf;
-    Stream<NodeD> stream = new Stream();
+    Conf conf;
+    DefaultTokenizer tokenizer = ClusteringGraph.getUnstemmedTokenizer();
+    SentenceClusteringGraph<NodeSentence> clusteringGraph;
 
     enum Counter {
 
@@ -44,16 +37,18 @@ public class ClusterSentencesReducer extends Reducer<LongBoolWritable, SentenceW
 
     @Override
     public void setup(Context context) throws IOException {
-        conf = context.getConfiguration();
-        Datafile df = new Datafile(conf, conf.get("output"));
-        cf = new ClusterFile(df);
-        cf.openWrite();
+        conf = ContextTools.getConfiguration(context);
+        Datafile datafile = conf.getHDFSFile("output");
+        ClusterFile clusterFile = new ClusterFile(datafile);
+        clusteringGraph = new SentenceClusteringGraph<NodeSentence>(clusterFile);
+        clusterFile.openWrite();
     }
 
     @Override
-    public void reduce(LongBoolWritable key, Iterable<SentenceWritable> values, Context context) throws IOException, InterruptedException {
-        for (SentenceWritable value : values) {
-            addSentence(value, key.getValue2());
+    public void reduce(LongBoolWritable key, Iterable<SentenceWritable> sentences, Context context) throws IOException, InterruptedException {
+        for (SentenceWritable sentence : sentences) {
+            boolean isCandidate = key.getValue2();
+            addSentence(sentence, isCandidate);
             if (key.getValue2()) {
                 context.getCounter(Counter.candidate).increment(1);
             } else {
@@ -64,47 +59,66 @@ public class ClusterSentencesReducer extends Reducer<LongBoolWritable, SentenceW
 
     @Override
     public void cleanup(Context context) throws IOException, InterruptedException {
-        cf.closeWrite();
+        clusteringGraph.clusterFile.closeWrite();
     }
 
-    public void addSentence(SentenceWritable value, boolean isCandidate) {
-        ArrayList<String> features = tokenizer.tokenize(value.content);
-        if (features.size() > 1) {
-            HashSet<String> uniq = new HashSet(features);
-            NodeD node = new NodeD(value.sentenceID, value.domain, value.content, uniq, value.creationtime, value.getUUID(), value.sentenceNumber);
-            stream.nodes.put(node.getID(), node);
-            stream.add(node, uniq);
-            if (node.isClustered() && isCandidate) {
-                urlChanged(node);
-            }
+    public void addSentence(SentenceWritable sentenceWritable, boolean isCandidate) {
+        HashSet<String> terms = new HashSet(tokenizer.tokenize(sentenceWritable.content));
+        if (terms.size() > 1) {
+            NodeSentence sentence = new NodeSentence(sentenceWritable.sentenceID,
+                    sentenceWritable.domain, sentenceWritable.content, terms,
+                    sentenceWritable.creationtime, sentenceWritable.getUUID(),
+                    sentenceWritable.sentenceNumber);
+            clusteringGraph.addNode(sentence, terms, isCandidate);
         }
     }
 
-    public void urlChanged(Node addedurl) {
-        Cluster<NodeD> cluster = addedurl.getCluster();
-        if (cluster != null) {
-            ClusterWritable cw = new ClusterWritable();
-            cw.clusterid = cluster.getID();
-            for (Node url : cluster.getNodes()) {
-                if (url != addedurl) {
-                    cw.nodes.add(toUrlWritable((NodeD) url));
+    /**
+     * extends ClusteringGraph by writing the clusters of candidate sentences
+     * that are clustered immediately when added to the ClusterFile.
+     */
+    public static class SentenceClusteringGraph<N extends NodeSentence> extends ClusteringGraph<N> {
+
+        public ClusterFile clusterFile;
+
+        public SentenceClusteringGraph(ClusterFile clusterFile) {
+            super();
+            this.clusterFile = clusterFile;
+        }
+
+        /**
+         * write clustered candidate sentence to the clusterFile
+         */
+        @Override
+        public void clusteredCandidateSentence(NodeSentence candidateSentence) {
+            Cluster<NodeSentence> cluster = candidateSentence.getCluster();
+            ClusterWritable clusterWritable = new ClusterWritable();
+            clusterWritable.clusterid = cluster.getID();
+            for (NodeSentence sentence : cluster.getNodes()) {
+                if (sentence != candidateSentence) {
+                    clusterWritable.nodes.add(toUrlWritable(sentence));
                 }
             }
-            cw.nodes.add(toUrlWritable((NodeD) addedurl));
-            cw.write(cf);
+            clusterWritable.nodes.add(toUrlWritable(candidateSentence));
+            clusterWritable.write(clusterFile);
         }
-    }
 
-    public NodeWritable toUrlWritable(NodeD url) {
-        NodeWritable u = new NodeWritable();
-        u.creationtime = url.getCreationTime();
-        u.docid = url.getDocumentID();
-        u.domain = url.getDomain();
-        u.nnid = url.getNN();
-        u.nnscore = url.getScore();
-        u.sentenceNumber = url.sentence;
-        u.content = url.getContent();
-        u.sentenceID = url.getID();
-        return u;
+        /**
+         * @param sentence
+         * @return a NodeWritable that can be used as a member of a
+         * ClusterWritable and containing the sentence data.
+         */
+        public NodeWritable toUrlWritable(NodeSentence sentence) {
+            NodeWritable nodeWritable = new NodeWritable();
+            nodeWritable.creationtime = sentence.getCreationTime();
+            nodeWritable.docid = sentence.getDocumentID();
+            nodeWritable.domain = sentence.getDomain();
+            nodeWritable.nnid = sentence.getNearestNeighborIds();
+            nodeWritable.nnscore = sentence.getNearestNeighborScores();
+            nodeWritable.sentenceNumber = sentence.sentence;
+            nodeWritable.content = sentence.getContent();
+            nodeWritable.sentenceID = sentence.getID();
+            return nodeWritable;
+        }
     }
 }

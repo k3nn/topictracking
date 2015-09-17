@@ -1,15 +1,13 @@
 package stream5Retrieve.Unigram;
 
-import stream5Retrieve.NoTitle.*;
 import static stream5Retrieve.RetrieveJob.*;
-import MatchingClusterNode.MatchingClusterNodeWritable;
+import matchingClusterNode.MatchingClusterNodeWritable;
 import io.github.htools.lib.Log;
 import io.github.htools.hadoop.Conf;
 import io.github.htools.hadoop.Job;
-import io.github.htools.io.HDFSPath;
 import java.io.IOException;
-import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.mapreduce.lib.output.NullOutputFormat;
+import stream5Retrieve.RetrieveReducer;
 
 public class RetrieveJob {
 
@@ -24,19 +22,11 @@ public class RetrieveJob {
         conf.setReduceMemoryMB(4096);
         conf.setTaskTimeout(3600000);
 
-        String input = conf.get("input");
-        Path out = new Path(conf.get("output"));
-
-        log.info("Tool name: %s", log.getLoggedClass().getName());
-        log.info(" - input: %s", input);
-        log.info(" - output: %s", out);
-        log.info(" - topicfile: %s", conf.get("topicfile"));
-
-        Job job = new Job(conf, input, out, conf.get("topicfile"));
+        Job job = new Job(conf, conf.get("input"), conf.get("output"), conf.get("topicfile"));
         //job.getConfiguration().setInt("mapreduce.task.timeout", 1800000);
 
         job.setInputFormatClass(InputFormat.class);
-        addInput(job, new HDFSPath(conf, conf.get("input")), conf.get("topicfile"));
+        addInput(job, conf.getHDFSPath("input"), conf.get("topicfile"));
 
         job.setNumReduceTasks(getParams().size());
         job.setMapperClass(RetrieveMap.class);

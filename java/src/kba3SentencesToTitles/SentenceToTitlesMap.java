@@ -2,7 +2,7 @@ package kba3SentencesToTitles;
 
 import io.github.htools.io.Datafile;
 import io.github.htools.io.HDFSPath;
-import Sentence.SentenceWritable;
+import sentence.SentenceWritable;
 import io.github.htools.lib.Log;
 import io.github.htools.type.Tuple2;
 import io.github.htools.hadoop.LogFile;
@@ -15,7 +15,9 @@ import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.NullWritable;
 import org.apache.hadoop.mapreduce.Mapper;
 import org.apache.hadoop.mapreduce.lib.input.FileSplit;
-import Sentence.SentenceFile;
+import sentence.SentenceFile;
+import io.github.htools.collection.HashPair;
+import io.github.htools.hadoop.ContextTools;
 
 /**
  * Filter out all but the title extracted from the HTML source (i.e. row=-1)
@@ -24,56 +26,58 @@ import Sentence.SentenceFile;
 public class SentenceToTitlesMap extends Mapper<LongWritable, SentenceWritable, NullWritable, NullWritable> {
 
     public static final Log log = new Log(SentenceToTitlesMap.class);
-    NewsDomains domain = NewsDomains.instance;
-    SentenceFile sf;
-    Datafile df;
-    HashSet<Tuple2<String, Integer>> map = new HashSet();
+    NewsDomains domain = NewsDomains.getInstance();
+    SentenceFile sentenceFile;
+    // track titles seen per domain, so we don't have two document with the same
+    // title in the same domain, which is likely a duplicate document
+    HashPair<String, Integer> titlesSeen = new HashPair();
     long creationtime = 0;
 
     @Override
     public void setup(Context context) throws IOException {
         Configuration conf = context.getConfiguration();
-        FileSplit fs = (FileSplit) context.getInputSplit();
-        String inpath = fs.getPath().toString();
-        String date = inpath.substring(inpath.lastIndexOf('/') + 1);
+        // date is the filename of the inputfile
+        String date = ContextTools.getInputPath(context).getName();
         HDFSPath outdir = new HDFSPath(conf, conf.get("output"));
-        df = outdir.getFile(date);
-        sf = new SentenceFile(df);
-        sf.openWrite();
+        Datafile datafile = outdir.getFile(date);
+        sentenceFile = new SentenceFile(datafile);
+        sentenceFile.openWrite();
     }
 
     @Override
-    public void map(LongWritable key, SentenceWritable value, Context context) {
+    public void map(LongWritable key, SentenceWritable sentence, Context context) {
         try {
             // use only sentenceNumber -1, which is the title extracted from the
             // HTML tags in the source document. 
-            if (value.sentenceNumber == -1) {
-                Tuple2<String, Integer> k = new Tuple2(value.content, value.domain);
-                if (creationtime == value.creationtime) {
+            if (sentence.sentenceNumber == -1) {
+                if (creationtime == sentence.creationtime) {
                     
                     // possibly a bit redundant, filters out duplicate titles 
                     // that have the same timestamp and same domain
-                    if (map.contains(k))
+                    // todo: this obviously does not correctly check for only
+                    // titles with the same timestamp
+                    if (titlesSeen.contains(sentence.content, sentence.domain))
                         return;
                 } else {
-                    creationtime = value.creationtime;
+                    creationtime = sentence.creationtime;
                 }
-                String dom = domain.getHost(value.domain);
+                String dom = domain.getHostPart(sentence.domain);
                 
                 // possibly a bit redundant, if RemoveDuplicates was used 
                 // strips non-content from titles
-                value.content = TitleFilter.filterHost(dom, value.content);
-                map.add(k);
-                value.sentenceNumber = 0;
-                value.write(sf);
+                sentence.content = TitleFilter.filterHost(dom, sentence.content);
+                titlesSeen.add(sentence.content, sentence.domain);
+                // renumber title to sentence nr 0
+                sentence.sentenceNumber = 0;
+                sentence.write(sentenceFile);
             }
         } catch (Exception ex) {
-            log.fatal("Exception %s %s", ex.getMessage(), df.getCanonicalPath());
+            log.fatal("Exception %s %s", ex.getMessage(), sentenceFile.getDatafile().getCanonicalPath());
         }
     }
 
     @Override
     public void cleanup(Context context) {
-        sf.closeWrite();
+        sentenceFile.closeWrite();
     }
 }

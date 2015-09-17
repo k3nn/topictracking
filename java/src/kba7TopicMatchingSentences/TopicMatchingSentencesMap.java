@@ -1,6 +1,6 @@
 package kba7TopicMatchingSentences;
 
-import KNN.Stream;
+import io.github.k3nn.ClusteringGraph;
 import io.github.htools.extract.DefaultTokenizer;
 import io.github.htools.lib.Log;
 import io.github.htools.hadoop.io.IntLongWritable;
@@ -11,46 +11,54 @@ import kbaeval.TopicWritable;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.mapreduce.Mapper;
-import Sentence.SentenceWritable;
+import sentence.SentenceWritable;
+import io.github.htools.collection.ArrayMap;
+import io.github.htools.hadoop.Conf;
+import io.github.htools.hadoop.ContextTools;
+import io.github.htools.lib.CollectionTools;
 
 /**
- * Route titles that contain all terms to one topic, to the reducer of that topic.
+ * Route titles that contain all terms to one topic, to the reducer of that
+ * topic.
+ *
  * @author jeroen
  */
 public class TopicMatchingSentencesMap extends Mapper<LongWritable, SentenceWritable, IntLongWritable, SentenceWritable> {
 
     public static final Log log = new Log(TopicMatchingSentencesMap.class);
-    Configuration conf;
-    public static DefaultTokenizer tokenizer = Stream.getUnstemmedTokenizer();
-    public ArrayList<HashSet<String>> topicterms;
+    Conf conf;
+    public static DefaultTokenizer tokenizer = ClusteringGraph.getUnstemmedTokenizer();
+
+    // topics to process
+    public ArrayMap<TopicWritable, HashSet<String>> topics;
+
+    // set of all query terms of all topics, for fast decision whether to match
+    // a title to all individual topics
     public HashSet<String> allterms;
-    public ArrayList<TopicWritable> topics;
+
+    // topic number & creation time
     IntLongWritable outkey = new IntLongWritable();
 
     @Override
     public void setup(Context context) throws IOException {
-        conf = context.getConfiguration();
+        conf = ContextTools.getConfiguration(context);
         topics = TopicMatchingSentencesJob.getTopics(conf);
-        topicterms = TopicMatchingSentencesJob.getTopicTerms(topics);
-        allterms = TopicMatchingSentencesJob.allTopicTerms(topicterms);
+        allterms = TopicMatchingSentencesJob.allTopicTerms(topics.values());
     }
 
     @Override
-    public void map(LongWritable key, SentenceWritable value, Context context) throws IOException, InterruptedException {
-        ArrayList<String> tokenize = tokenizer.tokenize(value.content);
-        for (String s : tokenize) {
-            if (allterms.contains(s)) {
-                HashSet<String> titleterms = new HashSet(tokenize);
-                for (int i = 0; i < topics.size(); i++) {
-                    if (titleterms.containsAll(topicterms.get(i))) {
-                        TopicWritable topic = topics.get(i);
-                        if (value.creationtime >= topic.start && value.creationtime <= topic.end) {
-                           outkey.set(i, value.creationtime);
-                           context.write(outkey, value);
-                        }
+    public void map(LongWritable key, SentenceWritable title, Context context) throws IOException, InterruptedException {
+        ArrayList<String> titleTerms = tokenizer.tokenize(title.content);
+        if (CollectionTools.containsAny(allterms, titleTerms)) {
+            HashSet<String> titleterms = new HashSet(titleTerms);
+            for (int topicIndex = 0; topicIndex < topics.size(); topicIndex++) {
+                if (titleterms.containsAll(topics.get(topicIndex).getValue())) {
+                    TopicWritable topic = topics.get(topicIndex).getKey();
+                    if (title.creationtime >= topic.start && title.creationtime <= topic.end) {
+                        outkey.set(topicIndex, title.creationtime);
+                        context.write(outkey, title);
                     }
                 }
-                break;
             }
         }
     }

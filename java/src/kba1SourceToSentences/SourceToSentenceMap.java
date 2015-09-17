@@ -1,10 +1,9 @@
 package kba1SourceToSentences;
 
 import io.github.htools.extract.HtmlTitleExtractor;
-import Sentence.SentenceWritable;
+import sentence.SentenceWritable;
 import io.github.htools.hadoop.io.IntLongIntWritable;
 import io.github.htools.lib.Log;
-import io.github.htools.hadoop.io.IntLongStringIntWritable;
 import java.io.IOException;
 import java.text.ParseException;
 import java.util.ArrayList;
@@ -13,10 +12,10 @@ import java.util.Map;
 import java.util.UUID;
 import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.mapreduce.Mapper;
-import kba1SourceToSentences.kba.ContentItem;
-import kba1SourceToSentences.kba.Sentence;
-import kba1SourceToSentences.kba.StreamItem;
-import kba1SourceToSentences.kba.Token;
+import kbaThriftReader.ContentItem;
+import kbaThriftReader.Sentence;
+import kbaThriftReader.StreamItem;
+import kbaThriftReader.Token;
 
 /**
  * Reads KBA StreamItems, and writes the contents of pages from NewsDomains
@@ -30,31 +29,24 @@ public class SourceToSentenceMap extends Mapper<LongWritable, StreamItem, IntLon
     HtmlTitleExtractor extractor = new HtmlTitleExtractor();
     // record used for output
     SentenceWritable outvalue = new SentenceWritable();
-    NewsDomains newsDomains = NewsDomains.instance;
+    NewsDomains newsDomains = NewsDomains.getInstance();
     IntLongIntWritable outkey = new IntLongIntWritable();
-    ReducerKeysDays reducerkeys;
     int sequence = 0;
 
     @Override
-    public void setup(Context context) throws IOException {
-        reducerkeys = new ReducerKeysDays(context.getConfiguration());
-    }
-
-    @Override
-    public void map(LongWritable key, StreamItem value, Context context) throws IOException, InterruptedException {
-        String url = getUrl(value);
+    public void map(LongWritable key, StreamItem streamItem, Context context) throws IOException, InterruptedException {
+        String url = getUrl(streamItem);
         outvalue.domain = newsDomains.getDomainForUrl(url);
-        if (outvalue.domain >= 0) {
+        if (outvalue.domain >= 0) { // only valid domains, so other urls are ignored
             try {
-                outvalue.creationtime = creationTime(value);
-                UUID docid = readID(value);
+                outvalue.creationtime = creationTime(streamItem);
+                UUID docid = readID(streamItem);
                 outvalue.documentIDLow = docid.getLeastSignificantBits();
                 outvalue.documentIDHigh = docid.getMostSignificantBits();
-                int day = reducerkeys.getDay(value);
-                outvalue.setID(day, 0);
+                outvalue.setSentenceID(streamItem, 0); // preliminary document id, with just date component 
                 
                 // write extracted title
-                String extractedTitle = extractTitle(url, value);
+                String extractedTitle = extractTitle(url, streamItem);
                 if (extractedTitle != null) {
                     // the extracted title is written as sentence number -1
                     // and the pre parsed title as sentence number 0
@@ -67,8 +59,10 @@ public class SourceToSentenceMap extends Mapper<LongWritable, StreamItem, IntLon
                 }
                 
                 // write all pre parsed sentences
-                ArrayList<String> sentences = getSentences(value);
+                ArrayList<String> sentences = getSentences(streamItem);
                 for (int row = 0; row < sentences.size(); row++) {
+                    // the sequence ensures the records are kept in the original order
+                    // which only works if input files are not split
                     outkey.set(0, outvalue.creationtime, sequence++);
                     outvalue.sentenceNumber = row;
                     outvalue.content = sentences.get(row);

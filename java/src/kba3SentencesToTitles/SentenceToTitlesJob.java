@@ -6,10 +6,12 @@ import io.github.htools.hadoop.io.InputFormat;
 import io.github.htools.hadoop.Job;
 import java.io.IOException;
 import org.apache.hadoop.mapreduce.lib.output.NullOutputFormat;
-import Sentence.SentenceInputFormat;
+import sentence.SentenceInputFormat;
 
 /**
  * Creates a file of only the titles of News Articles
+ * input: folder with SentenceFile per day as extracted from KBA corpus
+ * output: folder with SentenceFile per day containing only the titles
  * @author jeroen
  */
 public class SentenceToTitlesJob {

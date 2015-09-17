@@ -1,8 +1,9 @@
 package stream5Retrieve;
 
-import KNN.NodeD;
-import MatchingClusterNode.MatchingClusterNodeFile;
-import MatchingClusterNode.MatchingClusterNodeWritable;
+import matchingClusterNode.MatchingClusterNodeFile;
+import matchingClusterNode.MatchingClusterNodeWritable;
+import io.github.htools.hadoop.Conf;
+import io.github.htools.hadoop.ContextTools;
 import io.github.htools.io.Datafile;
 import io.github.htools.lib.Log;
 import io.github.htools.io.HDFSPath;
@@ -13,57 +14,37 @@ import java.util.Collections;
 import java.util.Comparator;
 import kbaeval.TrecFile;
 import kbaeval.TrecWritable;
-import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.io.NullWritable;
 import org.apache.hadoop.mapreduce.Reducer;
 import stream5Retrieve.RetrieveJob.Setting;
 
 /**
+ * Writes the resulting summary of qualified sentences to a TrecFile (TREC
+ * format results) and additionally a MatchingClusterNodeFile containing the
+ * actual content for inspection.
  *
  * @author jeroen
  */
 public class RetrieveReducer extends Reducer<Setting, MatchingClusterNodeWritable, NullWritable, NullWritable> {
 
     public static final Log log = new Log(RetrieveReducer.class);
-    Configuration conf;
-    HDFSPath outpath;
-    TrecFile trecfile;
-    TrecWritable record = new TrecWritable();
-    MatchingClusterNodeWritable recordcluster = new MatchingClusterNodeWritable();
-    MatchingClusterNodeFile outclusterfile;
+    Conf conf;
+    Setting setting;
+    HDFSPath outPath;
     ArrayList<MatchingClusterNodeWritable> results;
 
     @Override
     public void setup(Context context) throws IOException {
-        conf = context.getConfiguration();
-        outpath = new HDFSPath(conf, conf.get("output"));
+        conf = ContextTools.getConfiguration(context);
+        outPath = conf.getHDFSPath("output");
+        results = new ArrayList();
     }
 
     @Override
-    public void reduce(Setting key, Iterable<MatchingClusterNodeWritable> values, Context context) throws IOException, InterruptedException {
-        if (trecfile == null) {
-            Datafile df = outpath.getFile(sprintf("results.%d.%d.%d.%d", (int) (100 * key.gainratio), (int) (10 * key.hours), key.length, key.topk));
-            log.info("%s", df.getName());
-            trecfile = new TrecFile(df);
-            trecfile.openWrite();
-            df = outpath.getFile(sprintf("results.%d.%d.%d.%d.titles", (int) (100 * key.gainratio), (int) (10 * key.hours), key.length, key.topk));
-            outclusterfile = new MatchingClusterNodeFile(df);
-            outclusterfile.openWrite();
-            results = new ArrayList();
-            log.info("%f %f %d %d %d", key.gainratio, key.hours, key.length, key.topk, key.topicid);
-        }
-        for (MatchingClusterNodeWritable t : values) {
-            MatchingClusterNodeWritable nt = new MatchingClusterNodeWritable();
-            nt.clusterID = t.clusterID;
-            nt.creationTime = t.creationTime;
-            nt.documentID = t.documentID;
-            nt.domain = t.domain;
-            nt.nnid = t.nnid;
-            nt.nnscore = t.nnscore;
-            nt.sentenceNumber = t.sentenceNumber;
-            nt.content = t.content;
-            nt.sentenceID = t.sentenceID;
-            results.add(nt);
+    public void reduce(Setting setting, Iterable<MatchingClusterNodeWritable> qualifiedSentences, Context context) throws IOException, InterruptedException {
+        this.setting = setting;
+        for (MatchingClusterNodeWritable qualifiedSentence : qualifiedSentences) {
+            results.add(qualifiedSentence.clone());
         }
     }
 
@@ -71,21 +52,41 @@ public class RetrieveReducer extends Reducer<Setting, MatchingClusterNodeWritabl
     public void cleanup(Context context) throws IOException, InterruptedException {
         if (results != null && results.size() > 0) {
             Collections.sort(results, new Sorter());
-
+            TrecFile trecFile = openTrecFile(setting);
+            MatchingClusterNodeFile outClusterFile = openSentenceFile(setting);
+            TrecWritable record = new TrecWritable();
             for (MatchingClusterNodeWritable t : results) {
-                log.info("%d %s", t.creationTime, t.documentID);
-                t.write(outclusterfile);
+                //log.info("%d %s", t.creationTime, t.documentID);
+                t.write(outClusterFile);
                 record.document = t.documentID;
                 record.timestamp = t.creationTime;
                 record.topic = t.clusterID;
                 record.sentence = t.sentenceNumber;
-                record.write(trecfile);
+                record.write(trecFile);
             }
-            trecfile.closeWrite();
-            outclusterfile.closeWrite();
+            trecFile.closeWrite();
+            outClusterFile.closeWrite();
         }
     }
 
+    public TrecFile openTrecFile(Setting setting) {
+        Datafile trecDatafile = outPath.getFile(getFilename(setting));
+        TrecFile trecFile = new TrecFile(trecDatafile);
+        trecFile.openWrite();
+        return trecFile;
+    }
+    
+    public MatchingClusterNodeFile openSentenceFile(Setting setting) {
+        Datafile clusterDatafile = outPath.getFile(getFilename(setting) + ".title");
+        MatchingClusterNodeFile outClusterFile = new MatchingClusterNodeFile(clusterDatafile);
+        outClusterFile.openWrite();
+        return outClusterFile;
+    }
+
+    public String getFilename(Setting setting) {
+        return sprintf("results.%d.%d.%d.%d", (int) (100 * setting.gainratio), (int) (10 * setting.hours), setting.length, setting.topk);
+    }
+    
     class Sorter implements Comparator<MatchingClusterNodeWritable> {
 
         @Override

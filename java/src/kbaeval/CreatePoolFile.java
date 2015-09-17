@@ -1,7 +1,7 @@
 package kbaeval;
 
-import MatchingClusterNode.MatchingClusterNodeFile;
-import MatchingClusterNode.MatchingClusterNodeWritable;
+import matchingClusterNode.MatchingClusterNodeFile;
+import matchingClusterNode.MatchingClusterNodeWritable;
 import io.github.htools.collection.ArrayMap;
 import io.github.htools.io.Datafile;
 import io.github.htools.lib.ArgsParser;
@@ -18,11 +18,10 @@ public class CreatePoolFile {
     MatchingClusterNodeWritable recordcluster = new MatchingClusterNodeWritable();
     MatchingClusterNodeFile clusterfile;
 
-    public CreatePoolFile(Datafile in, Datafile pool, Datafile matchfile, Datafile inepool, ArrayList<Datafile> inematch) {
-        HashMap<String, PoolWritable> ePool = getEPool(inepool);
-        //log.info(ematches);
-        PoolFile poolfile = new PoolFile(pool);
-        poolfile.openWrite();
+    public CreatePoolFile(Datafile in, Datafile outPoolDatafile, Datafile matchfile, Datafile existigPoolDatafile, ArrayList<Datafile> inematch) {
+        HashMap<String, PoolWritable> existingPool = readExistingPoolFile(existigPoolDatafile);
+        PoolFile outPoolFile = new PoolFile(outPoolDatafile);
+        outPoolFile.openWrite();
         ArrayList<MatchEditWritable> matched = new ArrayList();
         clusterfile = new MatchingClusterNodeFile(in);
         HashMap<String, PoolWritable> pooled = new HashMap();
@@ -30,9 +29,9 @@ public class CreatePoolFile {
             PoolWritable record = new PoolWritable();
             record.update_id = w.documentID + "-" + w.sentenceNumber;
             record.query_id = w.clusterID;
-            PoolWritable existingpooled = ePool.get(record.update_id);
+            PoolWritable existingpooled = existingPool.get(record.update_id);
             if (existingpooled != null && existingpooled.query_id == record.query_id) {
-                existingpooled.write(poolfile);
+                existingpooled.write(outPoolFile);
                 pooled.put(existingpooled.update_id, existingpooled);
             } else {
                 record.doc_id = w.documentID;
@@ -40,12 +39,12 @@ public class CreatePoolFile {
                 record.update_id = w.documentID + "-" + w.sentenceNumber;
                 record.update_len = StrTools.countIndexOf(w.content, ' ') + 2;
                 record.update_text = w.content;
-                record.write(poolfile);
+                record.write(outPoolFile);
                 pooled.put(record.update_id, record);
             }
         }
 
-        HashMap<String, HashMap<String, MatchEditWritable>> ematches = getEmatches(inematch, pooled, ePool, poolfile);
+        HashMap<String, HashMap<String, MatchEditWritable>> ematches = getEmatches(inematch, pooled, existingPool, outPoolFile);
         for (PoolWritable record : pooled.values()) {
             HashMap<String, MatchEditWritable> list = ematches.get(record.update_id);
             if (list != null) {
@@ -60,7 +59,7 @@ public class CreatePoolFile {
                 matched.add(match);
             }
         }
-        poolfile.closeWrite();
+        outPoolFile.closeWrite();
         Collections.sort(matched, new Sorter());
         MatchEditFile mf = new MatchEditFile(matchfile);
         mf.openWrite();
@@ -86,28 +85,29 @@ public class CreatePoolFile {
 
     }
 
-    public HashMap<String, PoolWritable> getEPool(Datafile in) {
-        HashMap<String, PoolWritable> results = new HashMap();
-        PoolFile pf = new PoolFile(in);
-        for (PoolWritable w : pf) {
-            if (w.query_id < 11) {
-                PoolWritable existing = results.get(w.update_id);
-                if (existing != null) {
-                    log.info("duplicate %s %s %s %s", existing.query_id, existing.update_id, w.query_id, w.update_id);
-                }
-                results.put(w.update_id, w);
+    public HashMap<String, PoolWritable> readExistingPoolFile(Datafile datafile) {
+        HashMap<String, PoolWritable> updateid2PooledSentence = new HashMap();
+        PoolFile poolFile = new PoolFile(datafile);
+        for (PoolWritable pooledSentence : poolFile) {
+            PoolWritable existingPooledSentence = updateid2PooledSentence.get(pooledSentence.update_id);
+            if (existingPooledSentence != null) {
+                log.info("duplicate %s %s %s %s", 
+                        existingPooledSentence.query_id, 
+                        existingPooledSentence.update_id, 
+                        pooledSentence.query_id, 
+                        pooledSentence.update_id);
             }
+            updateid2PooledSentence.put(pooledSentence.update_id, pooledSentence);
         }
-        return results;
+        return updateid2PooledSentence;
     }
 
-    public HashMap<String, HashMap<String, MatchEditWritable>> getEmatches(ArrayList<Datafile> ins, 
+    public HashMap<String, HashMap<String, MatchEditWritable>> getEmatches(ArrayList<Datafile> ins,
             HashMap<String, PoolWritable> updates, HashMap<String, PoolWritable> ePool, PoolFile poolfile) {
         HashMap<String, HashMap<String, MatchEditWritable>> results = new HashMap();
         for (Datafile in : ins) {
             MatchFile pf = new MatchFile(in);
             for (MatchWritable w : pf) {
-                log.info("%s %s", w.update_id, w.nugget_id);
                 String id = w.update_id + w.nugget_id;
                 HashMap<String, MatchEditWritable> list = results.get(w.update_id);
                 if (list == null) {
@@ -122,18 +122,14 @@ public class CreatePoolFile {
                 if (!updates.containsKey(w.update_id)) {
                     PoolWritable existingpooled = ePool.get(w.update_id);
                     if (existingpooled != null && existingpooled.query_id == mw.query_id) {
-                       existingpooled.write(poolfile);
-                       updates.put(existingpooled.update_id, existingpooled);
-                       log.info("add %s", w.update_id);
-                    } else {
-                        log.info("miss %s", w.update_id);
+                        existingpooled.write(poolfile);
+                        updates.put(existingpooled.update_id, existingpooled);
                     }
                 }
                 if (updates.containsKey(w.update_id)) {
                     String text = updates.get(w.update_id).update_text;
-                    log.info("%s %s %d %d", w.update_id, text, w.match_start, w.match_end);
                     mw.match = text.substring(w.match_start, Math.min(w.match_end + 1, text.length()));
-                }  
+                }
                 list.put(w.nugget_id, mw);
             }
         }

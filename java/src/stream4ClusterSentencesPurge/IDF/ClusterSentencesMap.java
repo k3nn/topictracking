@@ -1,20 +1,19 @@
 package stream4ClusterSentencesPurge.IDF;
 
-import stream4ClusterSentencesPurge.*;
-import KNN.Stream;
-import static KNN.Stream.getUnstemmedTokenizer;
+import static io.github.k3nn.ClusteringGraph.getUnstemmedTokenizer;
 import io.github.htools.lib.Log;
 import java.io.IOException;
 import kba1SourceToSentences.NewsDomains;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.mapreduce.Mapper;
-import Sentence.SentenceWritable;
+import sentence.SentenceWritable;
 import io.github.htools.collection.HashMap3;
 import io.github.htools.extract.DefaultTokenizer;
 import io.github.htools.hadoop.io.LongBoolWritable;
 import io.github.htools.type.KV;
 import kba1SourceToSentences.TitleFilter;
+import static stream4ClusterSentences.ClusterSentencesJob.getRelevantDocs;
 
 /**
  *
@@ -25,7 +24,7 @@ public class ClusterSentencesMap extends Mapper<LongWritable, SentenceWritable, 
     public static final Log log = new Log(ClusterSentencesMap.class);
     Configuration conf;
     static DefaultTokenizer tokenizer = getUnstemmedTokenizer();
-    NewsDomains domain = NewsDomains.instance;
+    NewsDomains domain = NewsDomains.getInstance();
     HashMap3<String, Long, Boolean> relevantdocs;
     LongBoolWritable outkey = new LongBoolWritable();
 
@@ -38,7 +37,7 @@ public class ClusterSentencesMap extends Mapper<LongWritable, SentenceWritable, 
     @Override
     public void setup(Context context) throws IOException {
         conf = context.getConfiguration();
-        relevantdocs = ClusterSentencesJob.getRelevantDocs(conf);
+        relevantdocs = getRelevantDocs(conf);
     }
 
     @Override
@@ -48,7 +47,7 @@ public class ClusterSentencesMap extends Mapper<LongWritable, SentenceWritable, 
             if (value.sentenceNumber != 0) { // row 0 is duplicate for extracted title -1
                 if (value.sentenceNumber == -1) {
                     value.sentenceNumber = 0;
-                    String dom = domain.getHost(value.domain);
+                    String dom = domain.getHostPart(value.domain);
                     value.content = TitleFilter.filterHost(dom, value.content);
                 }
                     outkey.set(value.sentenceID, docparams.value);

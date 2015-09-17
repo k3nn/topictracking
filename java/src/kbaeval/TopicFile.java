@@ -39,4 +39,10 @@ public class TopicFile extends File<TopicWritable> {
         }
         return map;
     }
+    
+    public static HashMap<Integer, TopicWritable> getTopics(String topicfile) {
+        Datafile df = new Datafile(topicfile);
+        TopicFile tf = new TopicFile(df);
+        return tf.getMap();
+    }
 }

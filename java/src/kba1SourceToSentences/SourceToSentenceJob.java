@@ -1,16 +1,16 @@
 package kba1SourceToSentences;
 
-import Sentence.SentenceOutputFormat;
+import sentence.SentenceOutputFormat;
 import io.github.htools.io.HDFSPath;
 import io.github.htools.lib.Log;
 import io.github.htools.hadoop.Conf;
 import io.github.htools.hadoop.Job;
 import java.io.IOException;
 import org.apache.hadoop.fs.Path;
-import Sentence.SentenceWritable;
+import sentence.SentenceWritable;
 import io.github.htools.hadoop.io.IntLongIntWritable;
-import kba1SourceToSentences.reader.InputFormatKBA;
-import kba1SourceToSentences.reader.InputFormatKBAGZ;
+import kbaReader.InputFormatKBA;
+import kbaReader.InputFormatKBAGZ;
 
 /**
  * Reads the KBA Streaming corpus (tested with 2013 edition), and writes the 
@@ -26,11 +26,15 @@ public class SourceToSentenceJob {
         Conf conf = new Conf(args, "-i input -o output");
         conf.setMapMemoryMB(8192);
         
+        // every map reads (part of) an archive file, and sends it to the reducer
+        // to store in a chronological archive of sentences
+        // a different job is performed per date in the corpus
         Job job = new Job(conf, conf.get("input"), conf.get("output"));
         
-        String input = conf.get("input");
-        HDFSPath in = new HDFSPath(conf, input);
+        HDFSPath in = conf.getHDFSPath("input");
+        // inputformat KBAGZ is for the repacked .gz archive, use KBA for the original .xz archive
         job.setInputFormatClass(InputFormatKBAGZ.class);
+        // add all files as input for the job
         InputFormatKBA.addDirs(job, in);
         
         job.setMapperClass(SourceToSentenceMap.class);

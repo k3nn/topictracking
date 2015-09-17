@@ -11,9 +11,11 @@ import kbaeval.TopicWritable;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.mapreduce.lib.output.NullOutputFormat;
-import Sentence.SentenceInputFormat;
-import Sentence.SentenceWritable;
+import sentence.SentenceInputFormat;
+import sentence.SentenceWritable;
+import io.github.htools.collection.ArrayMap;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashSet;
 import static kba7TopicMatchingSentences.TopicMatchingSentencesMap.tokenizer;
 import org.apache.hadoop.conf.Configuration;
@@ -21,6 +23,11 @@ import org.apache.hadoop.conf.Configuration;
 /**
  * Create a list of all titles that contain all query terms. This list is used 
  * to flag "query matching clusters".
+ * input: folder with YYYY-MM-DD SentenceFile that contain the titles of documents
+ * that are used
+ * output: folder that will contain a SentenceFile per topic in the testset with the
+ * titles that contain all the topic's query terms
+ * topicfile: TREC .xml file that contains the topics, using TopicFile reader
  * @author jeroen
  */
 public class TopicMatchingSentencesJob {
@@ -32,21 +39,14 @@ public class TopicMatchingSentencesJob {
         Conf conf = new Conf(args, "-i input -o output -t topicfile");
         conf.setReduceSpeculativeExecution(false);
 
-        String inputfilename = conf.get("input");
-        Path out = new Path(conf.get("output"));
         setTopics(conf);
 
-        log.info("Tool name: %s", log.getLoggedClass().getName());
-        log.info(" - input: %s", inputfilename);
-        log.info(" - output: %s", out);
-        log.info(" - topics: %s", conf.get("topicfile"));
-
-        Job job = new Job(conf, inputfilename, out, conf.get("topicfile"));
-                //job.getConfiguration().setInt("mapreduce.task.timeout", 1800000);
+        Job job = new Job(conf, conf.get("input"), conf.get("output"), conf.get("topicfile"));
 
         job.setInputFormatClass(SentenceInputFormat.class);
-        SentenceInputFormat.addDirs(job, inputfilename);
+        SentenceInputFormat.addDirs(job, conf.get("input"));
 
+        // fixed to 10, since there are 10 topics in TS2013
         job.setNumReduceTasks(10);
         job.setMapperClass(TopicMatchingSentencesMap.class);
         job.setReducerClass(TopicMatchingSentencesReducer.class);
@@ -54,9 +54,10 @@ public class TopicMatchingSentencesJob {
         job.setMapOutputKeyClass(IntLongWritable.class);
         job.setMapOutputValueClass(SentenceWritable.class);
 
+        // not sure why we need to sort desc on creation time?
         job.setSortComparatorClass(IntLongWritable.DecreasingComparator.class);
 
-        FileSystem.get(conf).delete(out, true);
+        conf.getHDFSPath("output").trash();
         return job;
     }
 
@@ -78,8 +79,8 @@ public class TopicMatchingSentencesJob {
      * @param conf
      * @return list of topics read from Configuration
      */
-    public static ArrayList<TopicWritable> getTopics(Configuration conf) {
-        ArrayList<TopicWritable> result = new ArrayList();
+    public static ArrayMap<TopicWritable, HashSet<String>> getTopics(Configuration conf) {
+        ArrayMap<TopicWritable, HashSet<String>> result = new ArrayMap();
         String[] topics = conf.getStrings("topicquery");
         String[] ids = conf.getStrings("topicid");
         String[] starts = conf.getStrings("topicstart");
@@ -90,20 +91,8 @@ public class TopicMatchingSentencesJob {
             t.id = Integer.parseInt(ids[i]);
             t.start = Long.parseLong(starts[i])  - T_1;
             t.end = Long.parseLong(ends[i]);
-            result.add(t);
-        }
-        return result;
-    }
-
-    /**
-     * @param topics
-     * @return list of topics, with for each topic a list of unique query terms
-     */
-    public static ArrayList<HashSet<String>> getTopicTerms(ArrayList<TopicWritable> topics) {
-        ArrayList<HashSet<String>> result = new ArrayList();
-        for (TopicWritable t : topics) {
-            ArrayList<String> tokenize = tokenizer.tokenize(t.query);
-            result.add(new HashSet(tokenize));
+            HashSet<String> terms = new HashSet(tokenizer.tokenize(t.query));
+            result.add(t, terms);
         }
         return result;
     }
@@ -112,7 +101,7 @@ public class TopicMatchingSentencesJob {
      * @param topics
      * @return set containing query terms of all topics combined
      */
-    public static HashSet<String> allTopicTerms(ArrayList<HashSet<String>> topicterms) {
+    public static HashSet<String> allTopicTerms(Iterable<HashSet<String>> topicterms) {
         HashSet<String> allterms = new HashSet();
         for (HashSet<String> set : topicterms) {
             allterms.addAll(set);

@@ -1,12 +1,12 @@
 package kba6PreClusterTitles;
 
-import ClusterNode.ClusterNodeFile;
-import ClusterNode.ClusterNodeWritable;
-import KNN.Cluster;
-import KNN.Edge;
-import KNN.Node;
-import KNN.Stream;
-import KNN.NodeM;
+import clusterNode.ClusterNodeFile;
+import clusterNode.ClusterNodeWritable;
+import io.github.k3nn.Cluster;
+import io.github.k3nn.Edge;
+import io.github.k3nn.Node;
+import io.github.k3nn.ClusteringGraph;
+import io.github.k3nn.impl.NodeCount;
 import io.github.htools.collection.ArrayMap;
 import io.github.htools.collection.ArrayMap3;
 import io.github.htools.io.Datafile;
@@ -28,34 +28,39 @@ import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.NullWritable;
 import org.apache.hadoop.mapreduce.Mapper;
 import org.apache.hadoop.mapreduce.lib.input.FileSplit;
-import Sentence.SentenceFile;
-import Sentence.SentenceWritable;
+import sentence.SentenceFile;
+import sentence.SentenceWritable;
+import io.github.htools.collection.HashMapList;
+import io.github.htools.fcollection.FHashSet;
+import io.github.htools.hadoop.Conf;
+import io.github.htools.hadoop.ContextTools;
 
 /**
  * Clusters the titles that arrive in a day, expanding the clustering results of
  * the previous day. The titles arrive in order of timestamp. It assumes that
- * the input filename equals todays date in yyyy-mm-dd format. Based on this,
+ * the input filename equals todays date in YYYY-MM-DD format. Based on this,
  * the output path is scanned to read the results at the end of yesterday's
- * clustering. the output consists of all title nodes, clustered and not
- * clustered, that have not expired the T=3 days window, i.e. unclustered nodes
- * that are less than 4 days old, and all nodes in a cluster that has at least
- * one node that has not expired. Since the similarity between nodes is 0 when
- * their creation times are more than T apart, pruning these nodes will affect
- * future clustering results, which we verified to be correct for the KBA
- * corpus.
+ * clustering.
+ * <p/>
+ * The output consists of all title nodes, clustered and not clustered, that
+ * have not expired the T=3 days window, i.e. unclustered nodes that are less
+ * than 4 days old, and all nodes in a cluster that has at least one node that
+ * has not expired. Since the similarity between nodes is 0 when their creation
+ * times are more than T apart, pruning these nodes will not affect future
+ * clustering results, which we verified to be correct for the KBA corpus.
  *
  * @author jeroen
  */
 public class ClusterTitlesMap extends Mapper<LongWritable, SentenceWritable, NullWritable, NullWritable> {
 
     public static final Log log = new Log(ClusterTitlesMap.class);
-    // tokenizes words on non-alphanumeric characters, lowercases, remove stop
-    // words, but does not stem.
-    DefaultTokenizer tokenizer = Stream.getUnstemmedTokenizer();
+    Conf conf;
+    // tokenizes words by breaking on non-alphanumeric characters, lowercasing, 
+    // removing stop words, but does not stem.
+    DefaultTokenizer tokenizer = ClusteringGraph.getUnstemmedTokenizer();
     ClusterNodeWritable clusterwritable = new ClusterNodeWritable();
-    Configuration conf;
-    // the clustering stream
-    Stream<NodeM> stream;
+    // a 3NN clustering stream
+    ClusteringGraph<NodeCount> clusteringGraph;
     Date today;
     long expireTime;
 
@@ -66,34 +71,28 @@ public class ClusterTitlesMap extends Mapper<LongWritable, SentenceWritable, Nul
 
     @Override
     public void setup(Context context) throws IOException {
-        Profiler.setTraceOn();
-        stream = new Stream();
-        conf = context.getConfiguration();
-        String filename = ((FileSplit) context.getInputSplit()).getPath().getName();
-        String todayString = filename.substring(filename.lastIndexOf('/') + 1);
-        try {
-            today = DateTools.FORMAT.Y_M_D.toDate(todayString);
-            expireTime = DateTools.daysBefore(today, 3).getTime() / 1000;
-        } catch (ParseException ex) {
-            log.fatalexception(ex, "illegal date %s", todayString);
-        }
+        conf = ContextTools.getConfiguration(context);
+        clusteringGraph = new ClusteringGraph();
+        today = today(context);
+        expireTime = DateTools.daysBefore(today, 3).getTime() / 1000;
         readClusters();
     }
 
     @Override
-    public void map(LongWritable key, SentenceWritable value, Context context) {
-        ArrayList<String> features = tokenizer.tokenize(value.content);
+    public void map(LongWritable key, SentenceWritable title, Context context) {
+        ArrayList<String> features = tokenizer.tokenize(title.content);
         try {
             // only use titles with more than 1 word
             if (features.size() > 1) {
-                // use unique non stop words in title
-                HashSet<String> uniq = new HashSet(features);
                 context.getCounter(LABEL.CORRECT).increment(1);
 
-                // create node and add to cluster graph
-                NodeM node = new NodeM(value.sentenceID, value.domain, value.creationtime, uniq);
-                stream.nodes.put(node.getID(), node);
-                stream.add(node, uniq);
+                // use unique non stop words in title
+                HashSet<String> uniq = new HashSet(features);
+                // create node with the title's features
+                NodeCount node = new NodeCount(title.sentenceID, title.domain, title.creationtime, uniq);
+                // add the node to the clustering graph, assign nearest neighbors
+                // and update the clustering.
+                clusteringGraph.addNode(node, uniq);
             } else {
                 context.getCounter(LABEL.TOOSHORT).increment(1);
             }
@@ -109,64 +108,68 @@ public class ClusterTitlesMap extends Mapper<LongWritable, SentenceWritable, Nul
     @Override
     public void cleanup(Context context) throws IOException, InterruptedException {
         // map<nodeID, Node> of all non expired nodes
-        HashMap<Long, Node> out = new HashMap();
-        for (Cluster<NodeM> cluster : stream.getClusters()) {
-            outCluster(out, cluster);
+        HashMap<Long, Node> outTitlesMap = new HashMap();
+        for (Cluster<NodeCount> cluster : clusteringGraph.getClusters()) {
+            if (!cluster.getNodes().containsAll(cluster.getCore())) {
+                log.info("FAIL %s", cluster.evalall());
+                log.crash();
+            }
+            addNonExpiredClusters(outTitlesMap, cluster);
         }
-        addUnclustered(out);
-        stream = null; // free memory
+        addNonExpiredUnclusteredNodes(outTitlesMap);
+        clusteringGraph = null; // free memory
 
-        // map<clusterID, Node> that is sorted
-        ArrayMap<Integer, Node> clusterNodes = new ArrayMap();
-        for (Node url : out.values()) {
-            Cluster c = url.getCluster();
-            clusterNodes.add(c == null ? -1 : c.getID(), url);
+        // map<clusterID, Node> that is sorted, id=-1 is used when not clustered
+        ArrayMap<Integer, Node> outTitlesList = new ArrayMap();
+        for (Node title : outTitlesMap.values()) {
+            Cluster cluster = title.getCluster();
+            outTitlesList.add(cluster == null ? -1 : cluster.getID(), title);
         }
-        out = null; // free memory
+        outTitlesMap = null; // free memory
 
-        // fetch titles from file and add to nodes
-        HashMap<Long, String> titles = this.getTitlesYesterday();
-        titles.putAll(this.getTitlesToday());
+        // read titles from file
+        HashMap<Long, String> sentenceID2TitleMap = getTitlesYesterday();
+        sentenceID2TitleMap.putAll(getTitlesToday());
 
         // write to file
-        ClusterNodeFile cf = new ClusterNodeFile(new Datafile(conf, conf.get("output")));
-        cf.openWrite();
-        for (Node url : clusterNodes.ascending().values()) {
-            clusterwritable.set(url);
-            clusterwritable.content = titles.get(url.getID());
-            clusterwritable.write(cf);
+        ClusterNodeFile clusterNodeFile = new ClusterNodeFile(conf.getHDFSFile("output"));
+        clusterNodeFile.openWrite();
+        for (Node title : outTitlesList.ascending().values()) {
+            clusterwritable.set(title);
+            clusterwritable.content = sentenceID2TitleMap.get(title.getID());
+            clusterwritable.write(clusterNodeFile);
         }
-        cf.closeWrite();
+        clusterNodeFile.closeWrite();
     }
 
     // add all node from non-expired clusters, i.e. containing a node that has not expired
-    private void outCluster(HashMap<Long, Node> out, Cluster<NodeM> cluster) throws IOException, InterruptedException {
-        for (Node checkurl : cluster.getNodes()) {
-            if (clusterNotExpired(cluster)) {
-                addRec(out, new HashSet(cluster.getNodes()));
-                break;
+    private void addNonExpiredClusters(HashMap<Long, Node> outTitlesMap,
+            Cluster<NodeCount> cluster) throws IOException, InterruptedException {
+        if (clusterNotExpired(cluster)) {
+            for (Node title : cluster.getNodes()) {
+                addRec(outTitlesMap, new HashSet(cluster.getNodes()));
             }
         }
     }
 
     // add all non-expired unclustered nodes
-    private void addUnclustered(HashMap<Long, Node> out) {
-        HashSet<Node> urls = new HashSet();
-        for (NodeM url : stream.nodes.values()) {
-            if (!url.isClustered() && nodeNotExpired(url) && !out.containsKey(url.getID())) {
-                urls.add(url);
+    private void addNonExpiredUnclusteredNodes(HashMap<Long, Node> outTitlesMap) {
+        HashSet<Node> titlesToAdd = new HashSet();
+        for (NodeCount title : clusteringGraph.getNodes().values()) {
+            if (!title.isClustered() && nodeNotExpired(title) && !outTitlesMap.containsKey(title.getID())) {
+                titlesToAdd.add(title);
             }
         }
-        addRec(out, urls);
+        addRec(outTitlesMap, titlesToAdd);
     }
 
     /**
      * @param cluster
-     * @return true if one node was created after expireTime
+     * @return true if at least one of the cluster members was created after expireTime
      */
-    public boolean clusterNotExpired(Cluster<NodeM> cluster) {
-        for (Node checkurl : cluster.getNodes()) {
-            if (checkurl.getCreationTime() > expireTime) {
+    public boolean clusterNotExpired(Cluster<NodeCount> cluster) {
+        for (Node title : cluster.getNodes()) {
+            if (nodeNotExpired(title)) {
                 return true;
             }
         }
@@ -175,30 +178,33 @@ public class ClusterTitlesMap extends Mapper<LongWritable, SentenceWritable, Nul
 
     /**
      * @param node
-     * @return true if created after expireTime
+     * @return true if the node's creationtime is after expireTime
      */
     public boolean nodeNotExpired(Node node) {
         return node.getCreationTime() > expireTime;
     }
 
-    // seems to be obselete
-    public void addRec(HashMap<Long, Node> map, HashSet<Node> toadd) {
-        while (toadd.size() > 0) {
-            for (Node u : toadd) {
-                map.put(u.getID(), u);
+    public void addRec(HashMap<Long, Node> outTitlesMap, HashSet<Node> titlesToAdd) {
+        while (titlesToAdd.size() > 0) {
+            // add titlesToAdd to outTitlesMap
+            for (Node title : titlesToAdd) {
+                outTitlesMap.put(title.getID(), title);
             }
-            HashSet<Node> newadd = new HashSet();
-            for (Node u : toadd) {
-                if (u.getCreationTime() > this.expireTime || u.isClustered()) {
-                    for (int e = 0; e < u.getEdges(); e++) {
-                        Node nn = u.getNN(e).getNode();
-                        if (nn != null && !map.containsKey(nn.getID())) {
-                            newadd.add(nn);
+            
+            // add the nearest neighbors of the added to titles as the next titlesToAdd
+            // the || title.isClustered can probably be dropped
+            HashSet<Node> newTitlesToAdd = new HashSet();
+            for (Node title : titlesToAdd) {
+                if (nodeNotExpired(title) || title.isClustered()) {
+                    for (int nnIndex = 0; nnIndex < title.countNearestNeighbors(); nnIndex++) {
+                        Node nn = title.getNearestNeighbor(nnIndex).getNode();
+                        if (nn != null && !outTitlesMap.containsKey(nn.getID())) {
+                            newTitlesToAdd.add(nn);
                         }
                     }
                 }
             }
-            toadd = newadd;
+            titlesToAdd = newTitlesToAdd;
         }
     }
 
@@ -206,127 +212,163 @@ public class ClusterTitlesMap extends Mapper<LongWritable, SentenceWritable, Nul
      * Read the clustering at the end of yesterday.
      */
     public void readClusters() throws IOException {
-        HDFSPath dir = new HDFSPath(conf, conf.get("output")).getParentPath();
-        Date previousdate = DateTools.daysBefore(today, 1);
-        Datafile df = dir.getFile(DateTools.FORMAT.Y_M_D.format(previousdate));
-        if (df.exists() && df.getLength() > 0) {
-            ArrayMap3<Long, ArrayList<Long>, ArrayList<Double>> nn = new ArrayMap3();
-            ClusterNodeFile cf = new ClusterNodeFile(df);
-            for (ClusterNodeWritable cw : cf) {
-                NodeM url = (NodeM) stream.nodes.get(cw.sentenceID);
-                if (url == null) {
-                    url = getNode(cw.sentenceID, cw.domain, cw.creationTime, cw.content);
-                    nn.add(url.getID(), cw.getNN(), cw.getNNScore());
-                    if (cw.clusterID >= 0) {
-                        Cluster c = stream.getCluster(cw.clusterID);
-                        if (c == null) {
-                            c = stream.createCluster(cw.clusterID);
-                        }
-                        url.setCluster(c);
+        // output points directly to a file, get the containing folder
+        HDFSPath outfolder = conf.getHDFSPath("output").getParentPath();
+        // YYYY-MM-DD of yesterday
+        Date yesterday = DateTools.daysBefore(today, 1);
+        // filename at the end of yesterday's clustering
+        Datafile yesterdayDatafile = outfolder.getFile(DateTools.FORMAT.Y_M_D.format(yesterday));
+        HashMapList<Integer, NodeCount> clusterNodes = new HashMapList();
+        
+        // file can be length=0 because there is a gap in the KBA data
+        if (yesterdayDatafile.exists() && yesterdayDatafile.getLength() > 0) {
+            
+            // map of all nearest neighbor data, to be linked when all the nodes are read
+            ArrayMap3<Long, ArrayList<Long>, ArrayList<Double>> nearestNeighbors = new ArrayMap3();
+            
+            ClusterNodeFile clusterNodeFile = new ClusterNodeFile(yesterdayDatafile);
+            for (ClusterNodeWritable clusternode : clusterNodeFile) {
+                NodeCount clusterNode = (NodeCount) clusteringGraph.getNode(clusternode.sentenceID);
+                if (clusterNode == null) { // if does not exist, which should always be the case
+                    clusterNode = getTitleNode(clusternode.sentenceID, clusternode.domain, clusternode.creationTime, clusternode.content);
+                    nearestNeighbors.add(clusterNode.getID(), clusternode.getNearestNeighborIds(), clusternode.getNearestNeighborScores());
+                    
+                    // if clusterID < 0, node is not clustered, therefore no cluster is assigned
+                    if (clusternode.clusterID >= 0) {
+                        clusterNodes.add(clusternode.clusterID, clusterNode);
                     }
+                } else {
+                    log.info("clusterNode %d already exists, duplicates in file %s", clusterNode.getID(), yesterdayDatafile.getCanonicalPath());
                 }
             }
-            for (Map.Entry<Long, Tuple2<ArrayList<Long>, ArrayList<Double>>> entry : nn) {
-                NodeM url = stream.nodes.get(entry.getKey());
-                for (int i = 0; i < entry.getValue().key.size(); i++) {
-                    long nnid = entry.getValue().key.get(i);
-                    NodeM nnurl = stream.nodes.get(nnid);
-                    Edge e = new Edge(nnurl, entry.getValue().value.get(i));
-                    url.add(e);
+            
+            for (Map.Entry<Long, Tuple2<ArrayList<Long>, ArrayList<Double>>> nearestNeigbor : nearestNeighbors) {
+                NodeCount title = clusteringGraph.getNode(nearestNeigbor.getKey());
+                for (int i = 0; i < nearestNeigbor.getValue().key.size(); i++) {
+                    long nearestNeighbordID = nearestNeigbor.getValue().key.get(i);
+                    NodeCount nearestNeigborTitle = clusteringGraph.getNode(nearestNeighbordID);
+                    Edge nearestNeigborEdge = new Edge(nearestNeigborTitle, nearestNeigbor.getValue().value.get(i));
+                    title.add(nearestNeigborEdge);
                 }
             }
         } else {
-            stream.setStartClusterID(findNextClusterID(dir, today));
+            // there is a gap in the data that exceeds the expiration interval (3 days)
+            // therefore, there are no initial nodes in the graph, but we have to look
+            // up where we should continue the cluster numbering, by looking further
+            // back in time.
+            clusteringGraph.setStartClusterID(findNextClusterID(outfolder, today));
         }
 
-        ArrayList<Cluster> clusters = new ArrayList(stream.getClusters());
-        for (Cluster c : clusters) {
-            c.recheckBase();
+        // finally, create the clusters when a valid 2-degenerate core exists
+        // and add the other assigned nodes (majority votes) as members.
+        for (Map.Entry<Integer, ArrayList<NodeCount>> clusterid2Nodes : clusterNodes.entrySet()) {
+            int clusterid = clusterid2Nodes.getKey();
+            ArrayList<NodeCount> nodes = clusterid2Nodes.getValue();
+            clusteringGraph.createClusterFromSet(clusterid, nodes);
         }
-        //stream.resetChangedCluster();
     }
 
     /**
      * @return the last clusterID found in previous cluster files
      */
-    public static int findNextClusterID(HDFSPath dir, Date today) throws IOException {
-        ArrayList<Datafile> filenames = dir.getFiles();
-        String name = null;
-        for (Datafile d : filenames) {
-            if (d.getLength() > 0) {
+    public static int findNextClusterID(HDFSPath graphClusterFolder, Date today) throws IOException {
+        
+        // find the last file in graphClusterFolder with a date (filename) before
+        // today and a length > 0
+        String mostRecentClusterFile = null;
+        for (Datafile clusterDatafile : graphClusterFolder.getFiles()) {
+            if (clusterDatafile.getLength() > 0) {
                 try {
-                    if (DateTools.FORMAT.Y_M_D.toDate(d.getName()).before(today)) {
-                        name = d.getName();
+                    if (DateTools.FORMAT.Y_M_D.toDate(clusterDatafile.getName()).before(today)) {
+                        mostRecentClusterFile = clusterDatafile.getName();
                     }
                 } catch (ParseException ex) {
-                    log.exception(ex, "findNextCluster invalid date %s", d);
+                    log.exception(ex, "findNextCluster invalid date %s", clusterDatafile);
                 }
             }
         }
-        int clusterid = -1;
-        if (name != null) {
-            Datafile df = dir.getFile(name);
-            ClusterNodeFile cf = new ClusterNodeFile(df);
-            for (ClusterNodeWritable u : cf) {
-                clusterid = Math.max(clusterid, u.clusterID);
+         
+        // read the maximum cluster ID in that file if it exists.
+        int maxClusterIdAlreadyUsed = -1;
+        if (mostRecentClusterFile != null) {
+            Datafile datafile = graphClusterFolder.getFile(mostRecentClusterFile);
+            ClusterNodeFile clusterNodeFile = new ClusterNodeFile(datafile);
+            for (ClusterNodeWritable title : clusterNodeFile) {
+                maxClusterIdAlreadyUsed = Math.max(maxClusterIdAlreadyUsed, title.clusterID);
             }
         }
-        return clusterid + 1;
+        
+        // the next clusterID is the number to use for the next new cluster created
+        return maxClusterIdAlreadyUsed + 1;
     }
 
     /**
      * @return map with all titles in the cluster file of yesterday
      */
     public HashMap<Long, String> getTitlesYesterday() {
-        HashMap<Long, String> result = new HashMap();
-        HDFSPath dir = new HDFSPath(conf, conf.get("output")).getParentPath();
-        Date previousdate = DateTools.daysBefore(today, 1);
+        HashMap<Long, String> sentenceId2TitleMap = new HashMap();
+        HDFSPath graphClusterFolder = conf.getHDFSPath("output").getParentPath();
+        Date yesterday = DateTools.daysBefore(today, 1);
 
-        Datafile df = dir.getFile(DateTools.FORMAT.Y_M_D.format(previousdate));
-        if (df.exists()) {
-            ClusterNodeFile cf = new ClusterNodeFile(df);
-            for (ClusterNodeWritable cw : cf) {
-                result.put(cw.sentenceID, cw.content);
+        Datafile datafile = graphClusterFolder.getFile(DateTools.FORMAT.Y_M_D.format(yesterday));
+        if (datafile.exists()) {
+            ClusterNodeFile clusterNodeFile = new ClusterNodeFile(datafile);
+            for (ClusterNodeWritable title : clusterNodeFile) {
+                sentenceId2TitleMap.put(title.sentenceID, title.content);
             }
 
         }
-        return result;
+        return sentenceId2TitleMap;
     }
 
     /**
      * @return map with titles in the sentence file of today
      */
     public HashMap<Long, String> getTitlesToday() {
-        HashMap<Long, String> result = new HashMap();
-        HDFSPath dir = new HDFSPath(conf, conf.get("input")).getParentPath();
+        HashMap<Long, String> sentenceId2TitleMap = new HashMap();
+        HDFSPath graphClusterFolder = conf.getHDFSPath("input").getParentPath();
 
-        Datafile df = dir.getFile(DateTools.FORMAT.Y_M_D.format(today));
-        if (df.exists()) {
-            SentenceFile cf = new SentenceFile(df);
-            for (SentenceWritable cw : cf) {
-                result.put(cw.sentenceID, cw.content);
+        Datafile datafile = graphClusterFolder.getFile(DateTools.FORMAT.Y_M_D.format(today));
+        if (datafile.exists()) {
+            SentenceFile clusterNodeFile = new SentenceFile(datafile);
+            for (SentenceWritable cw : clusterNodeFile) {
+                sentenceId2TitleMap.put(cw.sentenceID, cw.content);
             }
         }
-        return result;
+        return sentenceId2TitleMap;
     }
 
     /**
      * @param sentenceid
      * @param domain
      * @param creationtime
-     * @param title
-     * @return created node, that was added to the stream pool and inverted index
+     * @param content
+     * @return If a node with sentenceID already exists it is returned, otherwise
+     * a new titleNode is created, and added to the stream pool and inverted
+     * index
      */
-    public NodeM getNode(long sentenceid, int domain, long creationtime, String title) {
-        NodeM node = (NodeM) stream.nodes.get(sentenceid);
-        if (node == null) {
-            ArrayList<String> features = tokenizer.tokenize(title);
-            if (features.size() > 1) {
-                node = new NodeM(sentenceid, domain, creationtime, features);
-                stream.nodes.put(node.getID(), node);
-                stream.iinodes.add(node, features);
+    public NodeCount getTitleNode(long sentenceid, int domain, long creationtime, String content) {
+        NodeCount titleNode = (NodeCount) clusteringGraph.getNode(sentenceid);
+        if (titleNode == null) {
+            ArrayList<String> terms = tokenizer.tokenize(content);
+            if (terms.size() > 1) {
+                titleNode = new NodeCount(sentenceid, domain, creationtime, terms);
+                clusteringGraph.getNodes().put(titleNode.getID(), titleNode);
+                clusteringGraph.nodeStore.add(titleNode, terms);
             }
-        } 
-        return node;
+            log.info("getTitleNode %d %s %s", sentenceid, content, titleNode);
+        }
+        return titleNode;
+    }
+
+    private Date today(Context context) {
+        // the name of the input file gives todays date
+        String todayString = ContextTools.getInputPath(context).getName();
+        try {
+            return DateTools.FORMAT.Y_M_D.toDate(todayString);
+        } catch (ParseException ex) {
+            log.fatalexception(ex, "illegal date %s", todayString);
+            return null;
+        }
     }
 }

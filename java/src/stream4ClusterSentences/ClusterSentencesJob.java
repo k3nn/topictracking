@@ -13,10 +13,10 @@ import java.util.HashSet;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.mapreduce.lib.output.NullOutputFormat;
-import stream3DocStream.DocFile;
-import stream3DocStream.DocWritable;
-import Sentence.SentenceInputFormat;
-import Sentence.SentenceWritable;
+import stream3DocStream.DocumentStreamFile;
+import stream3DocStream.DocumentStreamWritable;
+import sentence.SentenceInputFormat;
+import sentence.SentenceWritable;
 import io.github.htools.collection.HashMap3;
 import io.github.htools.hadoop.io.IntBoolWritable;
 import io.github.htools.hadoop.io.LongBoolWritable;
@@ -26,24 +26,14 @@ import org.apache.hadoop.io.LongWritable;
 public class ClusterSentencesJob {
 
     private static final Log log = new Log(ClusterSentencesJob.class);
-    static Conf conf;
 
     public static Job setup(String args[]) throws IOException {
-        conf = new Conf(args, "-i input -o output -d source");
+        Conf conf = new Conf(args, "-i input -o output -d source");
         conf.setReduceSpeculativeExecution(false);
         conf.setReduceMemoryMB(8192);
-        getRelevantDocs(conf);
+        //getRelevantDocs(conf);
 
-        String input = conf.get("input");
-        Path out = new Path(conf.get("output"));
-
-        log.info("Tool name: %s", log.getLoggedClass().getName());
-        log.info(" - input: %s", input);
-        log.info(" - output: %s", out);
-        log.info(" - source: %s", conf.get("source"));
-
-        Job job = new Job(conf, input, out, conf.get("source"));
-                //job.getConfiguration().setInt("mapreduce.task.timeout", 1800000);
+        Job job = new Job(conf, conf.get("input"), conf.get("output"), conf.get("source"));
         
         job.setInputFormatClass(SentenceInputFormat.class);
         setInputFiles(job);
@@ -59,21 +49,27 @@ public class ClusterSentencesJob {
         return job;
     }
 
+    /**
+     * @param conf
+     * @return map of documents that were seen in query matching clusters, 
+     * consisting of the TREC UUID, creation time and whether the document is a 
+     * candidate (was clustered in a query matching cluster upon arrival).
+     */
     public static HashMap3<String, Long, Boolean> getRelevantDocs(Configuration conf) {
-        HashMap3<String, Long, Boolean> result = new HashMap3();
+        HashMap3<String, Long, Boolean> documents = new HashMap3();
         Datafile df = new Datafile(conf, conf.get(("input")));
-        DocFile docfile = new DocFile(df);
-        for (DocWritable d : docfile) {
-            result.put(d.docid, d.creationtime, d.isCandidate);
+        DocumentStreamFile docfile = new DocumentStreamFile(df);
+        for (DocumentStreamWritable d : docfile) {
+            documents.put(d.docid, d.creationtime, d.isCandidate);
         }
-        return result;
+        return documents;
     }
     
     public static void setInputFiles(Job job) throws IOException {
         Configuration conf = job.getConfiguration();
         HashSet<String> dates = new HashSet();
-        HashMap3<String, Long, Boolean> relevantDocs = getRelevantDocs(conf);
-        for (String docid : relevantDocs.keySet()) {
+
+        for (String docid : getRelevantDocs(conf).keySet()) {
             String part[] = docid.split("-");
             if (part.length == 2) {
                 long creationtime = Long.parseLong(part[0]);

@@ -1,9 +1,9 @@
 package stream2AddDocID;
 
-import MatchingClusterNode.MatchingClusterNodeWritable;
-import Cluster.ClusterFile;
-import Cluster.ClusterWritable;
-import Cluster.NodeWritable;
+import matchingClusterNode.MatchingClusterNodeWritable;
+import cluster.ClusterFile;
+import cluster.ClusterWritable;
+import cluster.NodeWritable;
 import io.github.htools.collection.ArrayMap;
 import io.github.htools.io.Datafile;
 import io.github.htools.io.HDFSPath;
@@ -20,7 +20,8 @@ import kbaeval.TopicWritable;
 import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.io.NullWritable;
 import org.apache.hadoop.mapreduce.Reducer;
-import Sentence.SentenceWritable;
+import sentence.SentenceWritable;
+import io.github.htools.collection.HashMapList;
 
 /**
  * Add the collection's documentID and sentenceNumber of nodes in query matching
@@ -31,87 +32,63 @@ public class ClusterDocidReducer extends Reducer<IntWritable, SentenceWritable, 
 
     public static final Log log = new Log(ClusterDocidReducer.class);
     Conf conf;
-    Datafile infile;
-    ArrayList<ClusterWritable> retrieved;
-    HashMap<Long, ArrayList<NodeWritable>> nodesPerSentenceID;
+    ArrayList<ClusterWritable> clusters;
+    HashMapList<Long, NodeWritable> sentenceId2Node;
 
     @Override
     public void setup(Context context) throws IOException {
         conf = ContextTools.getConfiguration(context);
-        ArrayList<Datafile> inFiles = ClusterDocidJob.getResultFiles(conf);
-        infile = inFiles.get(ContextTools.getTaskID(context));
-        readRetrieved(infile);
+        clusters = new ArrayList();
+        sentenceId2Node = new HashMapList();
+        readQueryMatchingClusters(context, clusters, sentenceId2Node);
     }
 
     @Override
     public void reduce(IntWritable key, Iterable<SentenceWritable> values, Context context) throws IOException, InterruptedException {
         for (SentenceWritable value : values) {
-            ArrayList<NodeWritable> records = nodesPerSentenceID.get(value.sentenceID);
+            ArrayList<NodeWritable> records = sentenceId2Node.get(value.sentenceID);
             for (NodeWritable record : records) {
                record.docid = value.getDocumentID();
                record.sentenceNumber = value.sentenceNumber;
             }
         }
     }
-    
-    private class Sorter implements Comparator<NodeWritable> {
-
-        @Override
-        public int compare(NodeWritable o1, NodeWritable o2) {
-            return (int)(o1.creationtime - o2.creationtime);
-        }
-        
-    }
 
     @Override
     public void cleanup(Context context) throws IOException, InterruptedException {
-        Sorter sorter = new Sorter();
-        ArrayMap<Long, ClusterWritable> sorted = new ArrayMap();
-        for (ClusterWritable cluster : retrieved) {
-            Collections.sort(cluster.nodes, sorter);
-            NodeWritable lastUrl = cluster.nodes.get(cluster.nodes.size()-1);
-            sorted.add(lastUrl.creationtime, cluster);
-        }
-        
-        ClusterFile cf = getOutFile();
-        cf.openWrite();
-        for (ClusterWritable w : sorted.ascending().values())
-            w.write(cf);
-        cf.closeWrite();
+        ClusterFile clusterFile = getOutFile(context);
+        clusterFile.openWrite();
+        for (ClusterWritable cluster : clusters)
+            cluster.write(clusterFile);
+        clusterFile.closeWrite();
     }
 
-    public ClusterFile getOutFile() {
-        HDFSPath dir = new HDFSPath(conf, conf.get("output"));
-        Datafile outfile = dir.getFile(infile.getName());
+    public ClusterFile getOutFile(Context context) throws IOException {
+        HDFSPath dir = conf.getHDFSPath("output");
+        Datafile outfile = dir.getFile(getInputClusterFile(context).getName());
         return new ClusterFile(outfile);
     }
     
-    public void readRetrieved(Datafile df) {
-        retrieved = new ArrayList();
-        nodesPerSentenceID = new HashMap();
-        df.setBufferSize(100000000);
-        ClusterFile cf = new ClusterFile(df);
-        for (ClusterWritable w : cf) {
-            retrieved.add(w);
-            for (NodeWritable u : w.nodes) {
-                ArrayList<NodeWritable> list = nodesPerSentenceID.get(u.sentenceID);
-                if (list == null) {
-                    list = new ArrayList();
-                    nodesPerSentenceID.put(u.sentenceID, list);
-                }
-                list.add(u);
-            }
-        }
+    /**
+     * @return ClusterFile based on reducer nr and the list of cluster files to process
+     */
+    public Datafile getInputClusterFile(Context context) throws IOException {
+        ArrayList<Datafile> inFiles = ClusterDocidJob.getQueryMatchingClusterFiles(conf);
+        return inFiles.get(ContextTools.getTaskID(context));
     }
     
-    public int getTopicID(Conf conf, int topic) {
-        TopicFile tf = new TopicFile(new Datafile(conf, conf.get("topicfile")));
-        for (TopicWritable t : tf) {
-            if (topic-- == 0) {
-                tf.closeRead();
-                return t.id;
+    public void readQueryMatchingClusters(Context context, 
+            ArrayList<ClusterWritable> clusters, 
+            HashMapList<Long, NodeWritable> sentenceId2Node) throws IOException {
+        Datafile datafile = getInputClusterFile(context);
+        datafile.setBufferSize(100000000);
+        ClusterFile clusterFile = new ClusterFile(datafile);
+      
+        for (ClusterWritable cluster : clusterFile) {
+            clusters.add(cluster);
+            for (NodeWritable title : cluster.nodes) {
+                sentenceId2Node.add(title.sentenceID, title);
             }
         }
-        return -1;
     }
 }

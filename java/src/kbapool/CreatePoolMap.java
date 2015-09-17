@@ -1,6 +1,6 @@
 package kbapool;
 
-import Sentence.SentenceWritable;
+import sentence.SentenceWritable;
 import io.github.htools.collection.HashMapSet;
 import io.github.htools.hadoop.Conf;
 import io.github.htools.hadoop.ContextTools;
